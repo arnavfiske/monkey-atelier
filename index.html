@@ -6,32 +6,54 @@ function draw(){
  let rect=c.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2),w=rect.width,h=rect.height;if(!w||!h)return;
  c.width=Math.round(w*d);c.height=Math.round(h*d);g.setTransform(d,0,0,d,0,0);
  const S=Math.min(w,h)*.95,ox=(w-S)/2,oy=(h-S)/2,pix=p=>[ox+p[0]*S,oy+p[1]*S],q=pts.map(project);
- // Artist's rhythmic construction. All paths are retained in x-ray mode.
- // Front and back classification is approximate until a calibrated 3D head rig is available.
- const path=(ids,closed=false)=>{const n=ids.length;if(n<2)return;const nodes=ids.map(i=>q[i]),back=nodes.reduce((a,p)=>a+p[2],0)/n<-.035;if(back&&!$('xray').checked)return;
+ // Reference-based orbital/muzzle construction. The actual guides are NOT eyelid contours.
+ // Each control point deforms the relevant surface rhythm.
+ const curve=(nodes,closed=false)=>{
+  const n=nodes.length;if(n<2)return;const z=nodes.reduce((sum,p)=>sum+p[2],0)/n,back=z<-.035;
+  if(back&&!$('xray').checked)return;
   g.beginPath();g.moveTo(...pix(nodes[0]));
-  for(let j=0;j<(closed?n:n-1);j++){const p0=nodes[(j-1+n)%n],p1=nodes[j],p2=nodes[(j+1)%n],p3=nodes[(j+2)%n],k=.14;
+  for(let i=0;i<(closed?n:n-1);i++){
+   const p0=nodes[(i-1+n)%n],p1=nodes[i],p2=nodes[(i+1)%n],p3=nodes[(i+2)%n],k=.16;
    const A=pix(p1),B=pix(p2),P=pix(p0),Q=pix(p3);
    g.bezierCurveTo(A[0]+(B[0]-P[0])*k,A[1]+(B[1]-P[1])*k,B[0]-(Q[0]-A[0])*k,B[1]-(Q[1]-A[1])*k,B[0],B[1]);
   }
-  if(closed)g.closePath();g.strokeStyle=back?$('back').value:$('front').value;g.lineWidth=+$('width').value;g.lineCap='round';g.lineJoin='round';g.setLineDash(back?[6,4]:[]);g.stroke();g.setLineDash([]);
+  if(closed)g.closePath();g.strokeStyle=back?$('back').value:$('front').value;g.lineWidth=+$('width').value;g.lineCap='round';g.lineJoin='round';g.setLineDash(back?[7,5]:[]);g.stroke();g.setLineDash([]);
  };
- // Existing editable points form the cranium, bridge, muzzle, cheek rhythms and jaw.
- for(const ids of [[0,1,2,3,4,5,6,7,8,9],[1,10,11,14,12,13,9],[2,10,20,21,4,5],[8,13,23,22,6,5],[11,14,12],[14,15,16,18],[20,17,18,19,23],[3,21,5,22,7]])path(ids);
- // Enlarged orbital loops constructed from editable brow and cheek anchors.
- // These are independent from eyelid contours and follow the head's projected perspective.
- const orbital=(left)=>{
-  const ids=left?[10,11,15,20]:[12,13,23,16];
-  const anchor=ids.map(i=>q[i]),center=anchor.reduce((a,p)=>[a[0]+p[0]/4,a[1]+p[1]/4],[0,0]);
-  const rx=Math.max(.075,Math.abs(anchor[1][0]-anchor[0][0])*.85),ry=Math.max(.09,Math.abs(anchor[2][1]-anchor[1][1])*.95);
-  const z=anchor.reduce((a,p)=>a+p[2],0)/4,back=z<-.035;if(back&&!$('xray').checked)return;
-  g.beginPath();for(let j=0;j<=64;j++){let t=j*Math.PI*2/64,x=center[0]+Math.cos(t)*rx,y=center[1]+Math.sin(t)*ry,p=pix([x,y]);if(!j)g.moveTo(...p);else g.lineTo(...p)}
-  g.strokeStyle=back?$('back').value:$('front').value;g.lineWidth=+$('width').value;g.setLineDash(back?[6,4]:[]);g.stroke();g.setLineDash([]);
+ const m=(i,j,t=.5)=>q[i].map((v,k)=>v*(1-t)+q[j][k]*t);
+ const offset=(p,x,y,z=0)=>[p[0]+x,p[1]+y,p[2]+z];
+ const lerp=(a,b,t)=>a.map((v,k)=>v*(1-t)+b[k]*t);
+ const loop=(cx,cy,rx,ry,z,angle=0)=>{
+  const arr=[];for(let i=0;i<16;i++){const t=i*2*Math.PI/16,co=Math.cos(t),si=Math.sin(t);arr.push([cx+co*rx*Math.cos(angle)-si*ry*Math.sin(angle),cy+co*rx*Math.sin(angle)+si*ry*Math.cos(angle),z+.028*co]);}curve(arr,true);
  };
- orbital(true);orbital(false);
- // Curved mouth pad / muzzle encircles the mouth independently of the lips.
- path([20,17,18,19,23],true);
- for(let p of q){g.beginPath();g.arc(...pix(p),3.5,0,Math.PI*2);g.fillStyle='#bdff45';g.fill()}
+ // Skull meridians and brow / eye-axis sweep
+ curve([q[3],q[2],q[1],q[0],q[9],q[8],q[7]]);
+ curve([q[2],offset(q[1],.025,.09),q[0],offset(q[9],-.025,.09),q[8]]);
+ curve([q[2],q[10],q[11],q[14],q[12],q[13],q[8]]);
+ // Eye sockets: broad, slanted overlapping volumes, NOT small circles on the eyes.
+ const L=m(10,11,.5),R=m(12,13,.5);
+ loop(L[0]-.018,L[1]-.012,.133,.151,L[2],-.17);
+ loop(R[0]+.018,R[1]-.012,.133,.151,R[2],.17);
+ // Nested orbital/eyebrow lower arcs, tapering toward bridge.
+ curve([offset(q[2],.035,.05),offset(q[10],-.045,-.082),offset(q[11],.008,-.092),q[14],q[15]]);
+ curve([offset(q[8],-.035,.05),offset(q[13],.045,-.082),offset(q[12],-.008,-.092),q[14],q[16]]);
+ // Nose bridge and wings.
+ curve([q[0],offset(q[14],0,-.105),q[14],q[15],q[18]]);
+ curve([q[14],q[16],q[18]]);
+ // S-shaped zygomatic/cheek rhythms extend from the orbital sockets to muzzle.
+ curve([q[2],q[10],offset(q[20],-.035,-.028),q[21],q[17],q[18]]);
+ curve([q[8],q[13],offset(q[23],.035,-.028),q[22],q[19],q[18]]);
+ curve([q[11],offset(q[20],.01,.045),q[17],q[18]]);
+ curve([q[12],offset(q[23],-.01,.045),q[19],q[18]]);
+ // Muzzle pads and curved lip enclosure. Mouth has its own volume, not merely an outline.
+ const mouth=m(17,19,.5),mz=q[18][2],cx=mouth[0],cy=mouth[1]-.013;
+ loop(cx,cy,.169,.119,mz,0);
+ curve([q[20],q[17],offset(q[18],0,-.015),q[19],q[23]]);
+ curve([q[21],q[17],q[18],q[19],q[22]]);
+ // Jaw and chin bowl, including the far side; xray retains back guides.
+ curve([q[3],q[4],q[5],q[6],q[7]]);
+ curve([q[21],q[4],q[5],q[6],q[22]]);
+ // Editable anchors remain visible for manual correction.
+ for(let p of q){g.beginPath();g.arc(...pix(p),3.3,0,Math.PI*2);g.fillStyle='#bdff45';g.fill()}
 }
 async function requestCamera(config){if(!navigator.mediaDevices?.getUserMedia)throw Error('Camera API unavailable. Use Safari over HTTPS.');let expired=false,timer;const p=navigator.mediaDevices.getUserMedia(config);p.then(s=>{if(expired)s.getTracks().forEach(t=>t.stop())},()=>{});try{return await Promise.race([p,new Promise((_,reject)=>timer=setTimeout(()=>{expired=true;reject(Error('Permission timed out after 15 seconds'))},15000))])}finally{clearTimeout(timer)}}
 $('start').onclick=async()=>{stop();const id=++requestId;pending=true;ui();status('Requesting camera…');try{const s=await requestCamera({audio:false,video:{facingMode:{ideal:'user'},width:{ideal:640},height:{ideal:480},frameRate:{ideal:15,max:24}}});if(id!==requestId){s.getTracks().forEach(t=>t.stop());return}stream=s;pending=false;ui();v.srcObject=s;await v.play();mode='camera';im.classList.add('hide');v.classList.remove('hide');log('Camera PASS '+JSON.stringify(s.getVideoTracks()[0].getSettings()));status('Camera ready. Tap Freeze to capture locally.');draw()}catch(e){pending=false;ui();log('Camera FAIL '+e.message);status('Camera failed: '+e.message)}};
