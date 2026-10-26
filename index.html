@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Monkey Atelier — Camera Lab</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#111716;color:#f5f7f1;font:15px -apple-system,BlinkMacSystemFont,system-ui,sans-serif}main{max-width:740px;margin:auto;padding:22px 18px 60px}h1{font-size:29px;letter-spacing:-1px;margin:8px 0}h2{font-size:16px}p{color:#b9c9c2;line-height:1.5}.tag{color:#b9ff69;font-weight:700;letter-spacing:.15em;font-size:11px}section{background:#1b2421;border:1px solid #35463e;border-radius:18px;padding:18px;margin:15px 0}button{background:#b9ff69;color:#142019;border:0;border-radius:13px;padding:14px 18px;font-weight:750;font-size:15px;cursor:pointer;margin:4px 4px 4px 0}button.secondary{background:#34453c;color:white}button:disabled{opacity:.45}video{width:100%;max-height:340px;object-fit:contain;background:#0a0d0c;border-radius:14px;transform:scaleX(-1)}#boot{padding:12px;background:#51252a;border-radius:10px}#boot.ready{background:#244932}pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#c4e8d4;font-size:12px;line-height:1.6}small{color:#a8b8ae}strong{color:#d7ffad}</style></head><body><main><div class="tag">MONKEY / ATELIER · CAMERA LAB 0.1</div><h1>Camera reliability test</h1><p>Standalone HTTPS camera diagnostic. No libraries, facial tracking, audio, uploads, or recording.</p><section><div id="boot">JavaScript has NOT started. If this stays red, open the hosted URL in Safari rather than an attachment preview.</div><p><button id="tap" type="button">Test buttons</button><span id="tapResult"></span></p></section><section><h2>Lowest-load camera test</h2><p>Requests front camera at <strong>160 × 120, 5 FPS</strong>. The browser may select different actual settings; these are reported below.</p><button id="start" type="button">Start camera</button><button class="secondary" id="stop" type="button" disabled>Stop camera</button><video id="preview" autoplay muted playsinline></video><p id="status" role="status">Camera not started.</p></section><section><h2>Diagnostics</h2><pre id="diagnostics">Waiting for JavaScript…</pre><button class="secondary" id="copy" type="button">Copy diagnostics</button><p><small>Camera frames stay in this browser's live preview. This page does not transmit, store, or record them. Safari will ask permission when you press Start.</small></p></section></main><script>
+(function(){
+'use strict';
+const $=id=>document.getElementById(id);
+let stream=null,startedAt=0,frameCount=0,lastFrameAt=0,rafId=0,frameCallbackId=0,stopping=false;
+const log=[];function add(s){log.push(new Date().toLocaleTimeString()+' '+s);$('diagnostics').textContent=log.join('\n');}
+function status(s){$('status').textContent=s;}
+function buttons(active){$('start').disabled=active;$('stop').disabled=!active;}
+function stop(){
+stopping=true;const video=$('preview');
+if(rafId)cancelAnimationFrame(rafId);
+if(frameCallbackId&&video.cancelVideoFrameCallback)video.cancelVideoFrameCallback(frameCallbackId);
+if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+video.pause();video.srcObject=null;buttons(false);status('Camera stopped. No frames saved.');add('Stopped; tracks released.');}
+function watchFrames(video){
+const callback=(now,meta)=>{if(stopping||!stream)return;frameCount++;lastFrameAt=performance.now();const secs=(lastFrameAt-startedAt)/1000;
+status('Camera active · '+frameCount+' rendered frames in '+secs.toFixed(1)+' s · observed '+(frameCount/Math.max(secs,.1)).toFixed(1)+' FPS');
+frameCallbackId=video.requestVideoFrameCallback(callback);
+};
+if(video.requestVideoFrameCallback){frameCallbackId=video.requestVideoFrameCallback(callback);}
+else{let previous=0;const loop=()=>{if(stopping||!stream)return;if(video.currentTime!==previous){frameCount++;previous=video.currentTime;}const secs=(performance.now()-startedAt)/1000;status('Camera active · preview running '+secs.toFixed(1)+' s (precise rendered-frame API unavailable)');rafId=requestAnimationFrame(loop)};rafId=requestAnimationFrame(loop);}
+}
+async function start(){
+if(stream)return;stopping=false;frameCount=0;
+add('Requesting camera: 160x120 ideal, 5fps max, user-facing, audio=false.');
+status('Requesting Safari camera permission…');$('start').disabled=true;
+if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){add('ERROR: getUserMedia unavailable.');status('Camera API unavailable. Open the HTTPS site in Safari.');buttons(false);return;}
+let timedOut=false;let timer;
+const pending=navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'user'},width:{ideal:160},height:{ideal:120},frameRate:{ideal:5,max:5}}});
+pending.then(s=>{if(timedOut)s.getTracks().forEach(t=>t.stop())},()=>{});
+try{
+const s=await Promise.race([pending,new Promise((_,reject)=>{timer=setTimeout(()=>{timedOut=true;reject(new Error('Permission request timed out after 15 seconds'))},15000)})]);
+if(stopping){s.getTracks().forEach(t=>t.stop());return;}
+stream=s;const track=s.getVideoTracks()[0];add('Permission granted. Track settings: '+JSON.stringify(track.getSettings()));track.onended=()=>{add('Camera track ended.');if(stream)stop()};
+const video=$('preview');video.srcObject=s;await video.play();startedAt=performance.now();buttons(true);status('Camera active.');add('Video preview started.');watchFrames(video);
+}catch(e){add('FAILED: '+e.name+': '+e.message);status('Camera failed: '+e.name+' — '+e.message);if(stream)stop();buttons(false);}
+finally{clearTimeout(timer);}
+}
+$('boot').textContent='JavaScript running. Buttons should respond.';$('boot').classList.add('ready');
+$('tap').onclick=()=>{$('tapResult').textContent=' Button works ✓';add('Button click confirmed.')};
+$('start').onclick=start;$('stop').onclick=stop;
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText($('diagnostics').textContent);add('Diagnostics copied.')}catch(e){add('Copy blocked: '+e.message)}};
+add('Secure context: '+window.isSecureContext);
+add('URL protocol: '+location.protocol);
+add('Camera API: '+!!navigator.mediaDevices?.getUserMedia);
+add('User agent: '+navigator.userAgent);
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&stream){add('Page hidden; stopping camera for privacy.');stop()}});
+window.addEventListener('pagehide',()=>{if(stream)stop()});
+})();
+</script></body></html>
