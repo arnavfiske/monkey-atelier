@@ -1,0 +1,166 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Monkey Atelier · Live Tracking</title><style>*{box-sizing:border-box}body{margin:0;font:15px system-ui;background:#f7fbf4;color:#20392a}header{padding:16px 20px;background:white;border-bottom:1px solid #cde2c7}header a{color:#406f26}main{max-width:900px;margin:auto;padding:16px;display:grid;grid-template-columns:1.4fr 1fr;gap:16px}.card{background:white;border:1px solid #d6e4d0;border-radius:18px;padding:16px;min-width:0}h1{margin:0;font-size:21px}h2{font-size:16px}.stage{position:relative;aspect-ratio:4/3;background:#172b22;border-radius:14px;overflow:hidden}.stage video,.stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform:scaleX(-1)}button{border:1px solid #9bc28b;border-radius:12px;background:#baff55;padding:12px 14px;font:inherit;font-weight:700;margin:4px;cursor:pointer}button:disabled{opacity:.4}label{display:block;margin:14px 0}input[type=range]{width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.5}p{line-height:1.5;color:#526c59}.warn{background:#fff2c8;border-radius:10px;padding:12px}@media(max-width:700px){main{grid-template-columns:1fr}.stage{aspect-ratio:1/1}}</style></head><body><header><h1>MONKEY / ATELIER · LIVE TRACKING BETA</h1><a href="./">← Stable manual studio</a></header><main><section class="card"><h2>Reilly / Chimp Rhythm Construction · Experimental</h2><div class="stage"><video id="video" autoplay playsinline muted></video><canvas id="overlay"></canvas></div><button id="start">Start tracking</button><label>Analyze photo <input id="photo" type="file" accept="image/*"></label><button id="demo">Synthetic pose test</button><button id="cameraOnly">Test camera only</button><button id="stop" disabled>Stop</button><button id="capture" disabled>Save frame PNG</button><button id="record" disabled>Record landmarks</button><button id="export" disabled>Export animation JSON</button><button id="clear">Clear recording</button><span id="recordCount">0 frames</span><p id="status">Camera off. Tap Start tracking to load the tracker and request camera access.</p><p class="warn">Tracking is an experimental optional module. The stable manual studio remains unchanged. Your camera frames are processed on-device in the browser, not uploaded by this page. The face-tracking model and code are downloaded from external CDNs.</p></section><section class="card"><h2>Guide appearance</h2><label>Front color <input id="front" type="color" value="#baff55"></label><label>Reverse color <input id="back" type="color" value="#ff7454"></label><label>Line width <input id="width" type="range" min="1" max="7" value="3"></label><label><input id="dots" type="checkbox" checked> Construction landmarks</label><label><input id="mirror" type="checkbox" checked> Mirrored preview</label><h2>Motion smoothing</h2><label>Smoothing <input id="smooth" type="range" min="0" max="90" value="45"></label><label><input id="stabilize" type="checkbox" checked> Stabilize guide positions</label><h2>Live diagnostics</h2><pre id="log">JavaScript has not initialized. Open this HTTPS page in Safari.</pre><p>Reference-inspired orbital, cheek, muzzle and cranium rhythms. The mask remains visible as the face turns. Reverse-facing segments change color instead of disappearing. This is a heuristic 2D/3D projection, not a full calibrated anatomical rig.</p></section></main><script type="module">
+const $=id=>document.getElementById(id),v=$('video'),c=$('overlay'),ctx=c.getContext('2d');let photoModel=null,photoURL=null,solverFrame=null,filterBank=new Map(),lastFilterTime=0,landmarker=null,stream=null,running=false,raf=0,lastVideo=-1,frames=0,lastReport=0,smoothed=null,recording=false,recorded=[],recordStart=0;const lines=[
+// Curved outer chimp-method construction enclosing brow, cheeks, and mouth
+[10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,10],
+// brow and upper-eye arcs
+[70,63,105,66,107,55,65,52,53,46],[300,293,334,296,336,285,295,282,283,276],
+// eye contours
+[33,160,158,133,153,144,33],[263,387,385,362,380,373,263],
+// bridge and nose
+[168,6,197,195,5,4,1,2,98],[4,1,2,327],
+// monkey-mouth muzzle curved boundary
+[205,50,187,123,116,111,117,118,119,120,121,128,245,193,168,417,465,357,350,349,348,347,346,340,352,411,280,425],
+// mouth
+[61,40,37,0,267,270,291,321,314,17,84,91,61],
+// cheek guide arcs
+[33,116,123,147,213,192,214,210,202,61],[263,345,352,376,433,416,434,430,422,291]
+];const log=t=>{$('log').textContent=t},status=t=>$('status').textContent=t;
+function controls(){$('start').disabled=running;$('stop').disabled=!running;$('capture').disabled=!running}
+function stop(){recording=false;$('record').textContent='Record landmarks';running=false;cancelAnimationFrame(raf);if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}v.pause();v.srcObject=null;ctx.clearRect(0,0,c.width,c.height);controls();$('record').disabled=true;status('Camera stopped and released.')}
+// Reference-matched rhythm construction: smooth artist-defined curves, not MediaPipe topology.
+function draw(points){
+ const w=c.width,h=c.height;ctx.clearRect(0,0,w,h);
+ const p=i=>({x:points[i].x*w,y:points[i].y*h,z:points[i].z});
+ const mid=(a,b,t=.5)=>({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,z:a.z+(b.z-a.z)*t});
+ const shift=(a,dx,dy)=>({x:a.x+dx,y:a.y+dy,z:a.z});
+ const left=p(33),right=p(263),nose=p(1),chin=p(152),top=p(10),mouthL=p(61),mouthR=p(291),templeL=p(234),templeR=p(454);
+ const faceW=Math.hypot(right.x-left.x,right.y-left.y),faceH=Math.hypot(chin.x-top.x,chin.y-top.y);
+ const stroke=(nodes,close=false)=>{
+  if(nodes.length<2)return;
+  // Catmull-Rom converted to cubic Beziers. Endpoints stay attached to anatomical anchors.
+  const z=nodes.reduce((sum,a)=>sum+a.z,0)/nodes.length;
+  const rear=z>0.025;
+  ctx.beginPath();ctx.moveTo(nodes[0].x,nodes[0].y);
+  for(let i=0;i<(close?nodes.length:nodes.length-1);i++){
+   const a=nodes[(i-1+nodes.length)%nodes.length],b=nodes[i],d=nodes[(i+1)%nodes.length],e=nodes[(i+2)%nodes.length];
+   const t=0.72/6;
+   ctx.bezierCurveTo(b.x+(d.x-a.x)*t,b.y+(d.y-a.y)*t,d.x-(e.x-b.x)*t,d.y-(e.y-b.y)*t,d.x,d.y);
+  }
+  ctx.strokeStyle=rear?$('back').value:$('front').value;ctx.lineWidth=+$('width').value*(rear?.85:1);ctx.setLineDash(rear?[7,4]:[]);ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke();ctx.setLineDash([]);
+ };
+ // Eye socket rings: upper brow shelf and lower orbital bowl, NOT eyelid outlines.
+ for(const [outer,inner,brow,low,side] of [[33,133,105,145,234],[263,362,334,374,454]]){
+  const a=p(outer),b=p(inner),u=p(brow),l=p(low),t=p(side);
+  const span=Math.hypot(a.x-b.x,a.y-b.y);
+  const cx=(a.x+b.x)/2,cy=(a.y+b.y)/2;
+  const upper=shift(u,0,-faceH*.055);
+  const lower=shift(l,0,faceH*.055);
+  stroke([shift(a,(a.x-cx)*.18,-faceH*.015),upper,shift(b,(b.x-cx)*.12,-faceH*.018),lower],true);
+  // brow ridge rhythm across the forehead
+  stroke([shift(a,0,-faceH*.07),shift(u,0,-faceH*.10),shift(b,0,-faceH*.06)]);
+ }
+ // Central glabella / nose bridge and sweeping cheek rhythms.
+ stroke([p(168),p(6),p(197),nose,p(2),p(98)]);
+ stroke([p(168),p(6),p(197),nose,p(2),p(327)]);
+ stroke([p(33),p(116),p(123),p(205),mouthL]);
+ stroke([p(263),p(345),p(352),p(425),mouthR]);
+ // Orbital-cheek S curves like the photographed construction.
+ stroke([p(133),p(205),p(187),p(61),p(91)]);
+ stroke([p(362),p(425),p(411),p(291),p(321)]);
+ // Muzzle / mouth pad, distinct from the lip contour.
+ const upperM=mid(p(0),p(2),.28),lowerM=p(17);
+ stroke([shift(mouthL,-faceW*.13,-faceH*.015),upperM,shift(mouthR,faceW*.13,-faceH*.015),shift(lowerM,0,faceH*.065)],true);
+ stroke([mouthL,p(0),mouthR,p(17)],true);
+ // Head cap and temples, cross-face eye axis, chin and jaw.
+ stroke([p(127),p(21),p(54),top,p(284),p(251),p(356)]);
+ stroke([p(127),p(234),p(132),p(172),chin,p(397),p(361),p(454),p(356)]);
+ stroke([shift(templeL,-faceW*.1,-faceH*.03),p(33),p(168),p(263),shift(templeR,faceW*.1,-faceH*.03)]);
+ stroke([p(234),p(93),p(132),p(172),chin,p(397),p(361),p(323),p(454)]);
+ if($('dots').checked){for(const i of [10,152,33,263,1,61,291,168,234,454]){const a=p(i);ctx.beginPath();ctx.arc(a.x,a.y,2.5,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill()}}
+}
+
+/* CONSTRUCTION SOLVER V1: robust anchors, regularized smooth curves, temporal filtering,
+   face-local surface depth and retained rear-facing paths. */
+function oneEuro(key,value,time,cutoff=1.2,beta=.015){
+ const prev=filterBank.get(key);if(!prev){filterBank.set(key,{v:value,d:0,t:time});return value}
+ const dt=Math.max(.001,Math.min(.2,(time-prev.t)/1000));
+ const a=(hz)=>1/(1+1/(2*Math.PI*hz*dt));
+ const dv=(value-prev.v)/dt, d=prev.d+a(1)*(dv-prev.d);
+ const v=prev.v+a(cutoff+beta*Math.abs(d))*(value-prev.v);
+ filterBank.set(key,{v,d,t:time});return v;
+}
+function fitRhythms(points,blendshapes=[]){
+ // Iterative constrained least-squares in local 2D: data fidelity, neighbor smoothness,
+ // and prior-shape preservation. This solves an approximation, not a calibrated 3D model.
+ const expression=Object.fromEntries(blendshapes.map(x=>[x.categoryName,x.score]));
+ const mouthOpen=expression.jawOpen||0,smile=((expression.mouthSmileLeft||0)+(expression.mouthSmileRight||0))/2;
+ const specs=[
+ {name:'left-orbit',ids:[33,105,107,133,145,153],closed:true,bulge:.16},
+ {name:'right-orbit',ids:[263,334,336,362,374,380],closed:true,bulge:.16},
+ {name:'left-cheek',ids:[133,116,123,205,61],closed:false,bulge:.07},
+ {name:'right-cheek',ids:[362,345,352,425,291],closed:false,bulge:.07},
+ {name:'nose',ids:[168,6,197,1,2],closed:false,bulge:0},
+ {name:'muzzle',ids:[61,0,291,17],closed:true,bulge:.11+mouthOpen*.07},
+ {name:'brow',ids:[127,54,10,284,356],closed:false,bulge:.09},
+ {name:'jaw',ids:[234,132,172,152,397,361,454],closed:false,bulge:0}
+ ];
+ const out=[];
+ for(const spec of specs){
+  const anchors=spec.ids.map(i=>points[i]).filter(Boolean);if(anchors.length<3)continue;
+  const cx=anchors.reduce((s,p)=>s+p.x,0)/anchors.length,cy=anchors.reduce((s,p)=>s+p.y,0)/anchors.length;
+  const radius=Math.max(.001,Math.hypot(points[263].x-points[33].x,points[263].y-points[33].y));
+  const prior=anchors.map((p,i)=>{const vx=p.x-cx,vy=p.y-cy,l=Math.hypot(vx,vy)||1;return{x:p.x+vx/l*radius*spec.bulge,y:p.y+vy/l*radius*spec.bulge,z:p.z}});
+  let nodes=prior.map(p=>({...p}));
+  // Bounded Jacobi relaxation with a curvature regularizer.
+  for(let iter=0;iter<9;iter++){
+   nodes=nodes.map((p,i)=>{if(!spec.closed&&(i===0||i===nodes.length-1))return p;
+    const l=nodes[(i-1+nodes.length)%nodes.length],r=nodes[(i+1)%nodes.length],a=prior[i];
+    const x=(a.x*9+(l.x+r.x)*.6)/10.2,y=(a.y*9+(l.y+r.y)*.6)/10.2;
+    const limit=radius*.065,dx=x-a.x,dy=y-a.y,scale=Math.min(1,limit/(Math.hypot(dx,dy)||1));
+    return{x:a.x+dx*scale,y:a.y+dy*scale,z:p.z};
+   });
+  }
+  if(spec.name==='muzzle')nodes=nodes.map((p,i)=>({...p,y:p.y+(i===3?mouthOpen*.012:0),x:p.x+(i===0?-1:i===2?1:0)*smile*.007}));
+  out.push({...spec,nodes});
+ }
+ return out;
+}
+function drawSolved(points,blendshapes=[],time=performance.now()){
+ const w=c.width,h=c.height;ctx.clearRect(0,0,w,h);
+ const paths=fitRhythms(points,blendshapes);
+ const left=points[33],right=points[263],nose=points[1];
+ // Face-local depth test. Retain ALL paths; rear paths change color.
+ const vx=right.x-left.x,vy=right.y-left.y;
+ const yaw=(nose.x-(left.x+right.x)/2)/(Math.hypot(vx,vy)||1);
+ for(const path of paths){
+  const nodes=path.nodes.map((p,i)=>({x:oneEuro(path.name+i+'x',p.x*w,time),y:oneEuro(path.name+i+'y',p.y*h,time),z:p.z}));
+  const rear=nodes.reduce((s,p)=>s+p.z,0)/nodes.length>nose.z+.025 ||
+   ((path.name.includes('cheek')||path.name.includes('orbit'))&&Math.abs(yaw)>.23&&((yaw>0)===path.name.startsWith('left')));
+  ctx.beginPath();ctx.moveTo(nodes[0].x,nodes[0].y);
+  const n=nodes.length,segments=path.closed?n:n-1;
+  for(let i=0;i<segments;i++){const p0=nodes[(i-1+n)%n],p1=nodes[i],p2=nodes[(i+1)%n],p3=nodes[(i+2)%n],k=.13;
+   ctx.bezierCurveTo(p1.x+(p2.x-p0.x)*k,p1.y+(p2.y-p0.y)*k,p2.x-(p3.x-p1.x)*k,p2.y-(p3.y-p1.y)*k,p2.x,p2.y);
+  }
+  if(path.closed)ctx.closePath();
+  ctx.strokeStyle=rear?$('back').value:$('front').value;
+  ctx.lineWidth=+$('width').value;ctx.lineCap='round';ctx.lineJoin='round';ctx.setLineDash(rear?[7,4]:[]);ctx.stroke();ctx.setLineDash([]);
+ }
+ if($('dots').checked)for(const i of [33,263,1,61,291,152]){const p=points[i];ctx.beginPath();ctx.arc(p.x*w,p.y*h,2.5,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill()}
+}
+async function getPhotoTracker(){
+ if(photoModel)return photoModel;
+ const mp=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/+esm');
+ const files=await mp.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm');
+ photoModel=await mp.FaceLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',delegate:'CPU'},runningMode:'IMAGE',numFaces:1,outputFaceBlendshapes:true,outputFacialTransformationMatrixes:true});return photoModel;
+}
+$('photo').onchange=async e=>{
+ const f=e.target.files?.[0];if(!f)return;
+ try{status('Analyzing photo…');const model=await getPhotoTracker();const img=new Image();const url=URL.createObjectURL(f);await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;img.src=url});
+ const result=model.detect(img);if(!result.faceLandmarks?.length)throw Error('No face detected');
+ stop();c.width=img.naturalWidth;c.height=img.naturalHeight;
+ // Display photograph behind construction as a canvas background.
+ const bg=document.createElement('canvas');bg.width=c.width;bg.height=c.height;bg.getContext('2d').drawImage(img,0,0,c.width,c.height);
+ const oldDraw=drawSolved;filterBank.clear();drawSolved(result.faceLandmarks[0],result.faceBlendshapes?.[0]?.categories||[]);
+ const mask=document.createElement('canvas');mask.width=c.width;mask.height=c.height;mask.getContext('2d').drawImage(c,0,0);
+ ctx.clearRect(0,0,c.width,c.height);ctx.drawImage(bg,0,0);ctx.drawImage(mask,0,0);
+ $('capture').disabled=false;status('Photo fitted · save frame PNG to export');URL.revokeObjectURL(url);
+ }catch(err){status('Photo analysis failed: '+err.message);log(err.stack||err.message)}
+};
+$('demo').onclick=()=>{
+ status('Synthetic mode requires a tracked face or uploaded photo; no fabricated fit is displayed.');
+};
+
+function loop(){if(!running)return;try{if(v.readyState>=2&&v.currentTime!==lastVideo){lastVideo=v.currentTime;const result=landmarker.detectForVideo(v,performance.now());if(result.faceLandmarks?.length){const raw=result.faceLandmarks[0];const alpha=1-(+$('smooth').value/100);if(!$('stabilize').checked||!smoothed||smoothed.length!==raw.length)smoothed=raw.map(p=>({...p}));else smoothed=raw.map((p,i)=>({x:smoothed[i].x*(1-alpha)+p.x*alpha,y:smoothed[i].y*(1-alpha)+p.y*alpha,z:smoothed[i].z*(1-alpha)+p.z*alpha}));drawSolved(smoothed,result.faceBlendshapes?.[0]?.categories||[],performance.now());if(recording&&recorded.length<1800){recorded.push({t:Math.round(performance.now()-recordStart),points:smoothed.map(p=>[+p.x.toFixed(5),+p.y.toFixed(5),+p.z.toFixed(5)])});$('recordCount').textContent=recorded.length+' frames';$('export').disabled=false}frames++;status('Tracking face · '+result.faceLandmarks.length+' face detected')}else{ctx.clearRect(0,0,c.width,c.height);status('Camera running · no face detected')}let now=performance.now();if(now-lastReport>3000){log('Tracker running · processed '+frames+' detected frames · preview '+v.videoWidth+'×'+v.videoHeight);lastReport=now}}}catch(e){log('Tracking error: '+e.message);status('Tracking paused due to error');stop();return}raf=requestAnimationFrame(loop)}
+$('start').onclick=async()=>{if(running)return;$('start').disabled=true;status('Loading facial landmark model (first load requires internet)…');try{if(!navigator.mediaDevices?.getUserMedia)throw Error('Camera unavailable; open in Safari via HTTPS');log('Step 1/4: loading tracker JavaScript…');const mp=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/+esm');log('Step 1/4 OK: tracker JavaScript loaded');log('Step 2/4: loading WebAssembly runtime…');const files=await mp.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm');log('Step 2/4 OK; Step 3/4: downloading face model…');landmarker=await mp.FaceLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',delegate:'CPU'},runningMode:'VIDEO',numFaces:1,outputFaceBlendshapes:true,outputFacialTransformationMatrixes:true});log('Step 3/4 OK; Step 4/4: requesting camera…');stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:480},height:{ideal:360},frameRate:{ideal:15,max:20}}});v.srcObject=stream;await v.play();c.width=v.videoWidth;c.height=v.videoHeight;running=true;lastVideo=-1;frames=0;lastReport=0;smoothed=null;controls();$('record').disabled=false;log('Step 4/4 OK: tracker ready, camera '+v.videoWidth+'×'+v.videoHeight);loop()}catch(e){log('Startup failed: '+e.name+': '+e.message+'\n'+(e.stack||''));stop();status('Tracker startup failed: '+e.message+' — see diagnostics.');$('start').disabled=false}};
+$('cameraOnly').onclick=async()=>{if(running){status('Stop tracking first');return}status('Testing camera without tracker…');try{const t=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:320},height:{ideal:240}}});v.srcObject=t;await v.play();log('CAMERA-ONLY PASS '+JSON.stringify(t.getVideoTracks()[0].getSettings()));status('Camera-only test passed. Preview shown for 5 seconds.');setTimeout(()=>{t.getTracks().forEach(x=>x.stop());v.srcObject=null;status('Camera-only test finished; tracks released.')},5000)}catch(e){log('CAMERA-ONLY FAIL '+e.name+': '+e.message);status('Camera-only test failed: '+e.message)}};$('stop').onclick=stop;$('record').onclick=()=>{if(!running)return;recording=!recording;if(recording){recordStart=performance.now();status('Recording landmarks locally…')}else{status('Recording paused. Export animation JSON.')} $('record').textContent=recording?'Pause recording':'Record landmarks'};$('clear').onclick=()=>{recording=false;recorded=[];$('record').textContent='Record landmarks';$('recordCount').textContent='0 frames';$('export').disabled=true;status('Recording cleared')};$('export').onclick=()=>{if(!recorded.length)return;const blob=new Blob([JSON.stringify({format:'monkey-atelier-landmarks-v1',width:c.width,height:c.height,mirrored:$('mirror').checked,frames:recorded})],{type:'application/json'});const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='monkey-animation.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),5000)};$('capture').onclick=()=>{if(!running)return;let out=document.createElement('canvas');out.width=c.width;out.height=c.height;let x=out.getContext('2d');x.translate(out.width,0);x.scale(-1,1);x.drawImage(v,0,0,out.width,out.height);x.setTransform(1,0,0,1,0,0);x.save();if($('mirror').checked){x.translate(out.width,0);x.scale(-1,1)}x.drawImage(c,0,0);x.restore();out.toBlob(blob=>{if(!blob)return;let u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='monkey-tracking-frame.png';a.click();setTimeout(()=>URL.revokeObjectURL(u),4000)},'image/png')};$('mirror').onchange=()=>{const s=$('mirror').checked?'scaleX(-1)':'none';v.style.transform=s;c.style.transform=s};document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)stop()});window.addEventListener('pagehide',stop);log('JavaScript running · secure context: '+isSecureContext+' · camera API: '+!!navigator.mediaDevices?.getUserMedia);
+</script></body></html>
